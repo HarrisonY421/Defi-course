@@ -1,0 +1,21 @@
+{
+  "name": "final-lab-zero-knowledge-anonymous-trading",
+  "version": "1.0.0",
+  "description": "Proof generation helpers for the zero-knowledge anonymous trading lab.",
+  "scripts": {
+    "identity": "node scripts/generate_identity.mjs",
+    "proof": "node scripts/generate_proof_packet.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@semaphore-protocol/data": "^4.14.2",
+    "@semaphore-protocol/group": "^4.14.2",
+    "@semaphore-protocol/identity": "^4.14.2",
+    "@semaphore-protocol/proof": "^4.14.2",
+    "ethers": "^6.16.0"
+  },
+  "private": true
+}

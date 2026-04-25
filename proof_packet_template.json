@@ -1,0 +1,18 @@
+{
+  "_comment": "Reference template only. Generate proof_packet.generated.json locally with npm run proof; do not commit generated proof files.",
+  "merkleTreeDepth": 0,
+  "merkleTreeRoot": 0,
+  "nullifier": 0,
+  "message": 0,
+  "scope": 0,
+  "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ]
+}
