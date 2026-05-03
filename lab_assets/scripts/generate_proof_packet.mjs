@@ -25,6 +25,8 @@ function parseArgs(argv) {
     semaphore: process.env.SEMAPHORE_ADDRESS ?? DEFAULT_SEMAPHORE_ADDRESS,
     startBlock: process.env.SEMAPHORE_START_BLOCK ?? String(DEFAULT_SEPOLIA_SEMAPHORE_START_BLOCK),
     blockRange: process.env.LOG_BLOCK_RANGE ?? "49999",
+    requestDelayMs: process.env.RPC_REQUEST_DELAY_MS ?? "300",
+    retries: process.env.RPC_RETRIES ?? "5",
     force: false
   }
 
@@ -47,6 +49,10 @@ function parseArgs(argv) {
       args.startBlock = argv[++i]
     } else if (arg === "--block-range") {
       args.blockRange = argv[++i]
+    } else if (arg === "--request-delay-ms") {
+      args.requestDelayMs = argv[++i]
+    } else if (arg === "--retries") {
+      args.retries = argv[++i]
     } else if (arg === "--force") {
       args.force = true
     } else if (arg === "--help" || arg === "-h") {
@@ -69,10 +75,12 @@ Optional:
   --semaphore ${DEFAULT_SEMAPHORE_ADDRESS}
   --start-block ${DEFAULT_SEPOLIA_SEMAPHORE_START_BLOCK}
   --block-range 49999
+  --request-delay-ms 300
+  --retries 5
   --force
 
 Environment variables with the same meaning are also supported:
-  RPC_URL, TRADE_DESK_ADDRESS, RECIPIENT_ADDRESS, IDENTITY_FILE, PROOF_PACKET_PATH, SEMAPHORE_ADDRESS, SEMAPHORE_START_BLOCK, LOG_BLOCK_RANGE`)
+  RPC_URL, TRADE_DESK_ADDRESS, RECIPIENT_ADDRESS, IDENTITY_FILE, PROOF_PACKET_PATH, SEMAPHORE_ADDRESS, SEMAPHORE_START_BLOCK, LOG_BLOCK_RANGE, RPC_REQUEST_DELAY_MS, RPC_RETRIES`)
 }
 
 function requireValue(value, name) {
@@ -106,6 +114,8 @@ const recipientAddress = normalizeAddress(args.recipient, "RECIPIENT_ADDRESS")
 const semaphoreAddress = normalizeAddress(args.semaphore, "SEMAPHORE_ADDRESS")
 const startBlock = Number(requireValue(args.startBlock, "SEMAPHORE_START_BLOCK"))
 const blockRange = Number(requireValue(args.blockRange, "LOG_BLOCK_RANGE"))
+const requestDelayMs = Number(requireValue(args.requestDelayMs, "RPC_REQUEST_DELAY_MS"))
+const rpcRetries = Number(requireValue(args.retries, "RPC_RETRIES"))
 const identityPath = path.resolve(process.cwd(), args.identity)
 const outputPath = path.resolve(process.cwd(), args.out)
 
@@ -115,6 +125,14 @@ if (!Number.isSafeInteger(startBlock) || startBlock < 0) {
 
 if (!Number.isSafeInteger(blockRange) || blockRange <= 0) {
   throw new Error(`LOG_BLOCK_RANGE must be a positive integer: ${args.blockRange}`)
+}
+
+if (!Number.isSafeInteger(requestDelayMs) || requestDelayMs < 0) {
+  throw new Error(`RPC_REQUEST_DELAY_MS must be a non-negative integer: ${args.requestDelayMs}`)
+}
+
+if (!Number.isSafeInteger(rpcRetries) || rpcRetries < 0) {
+  throw new Error(`RPC_RETRIES must be a non-negative integer: ${args.retries}`)
 }
 
 if (!fs.existsSync(identityPath)) {
@@ -148,15 +166,80 @@ const semaphoreAbi = [
 ]
 const semaphoreContract = new Contract(semaphoreAddress, semaphoreAbi, provider)
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function isRetryableRpcError(error) {
+  const text = [
+    error?.message,
+    error?.shortMessage,
+    error?.code,
+    safeStringify(error?.value),
+    safeStringify(error?.info)
+  ]
+    .join(" ")
+    .toLowerCase()
+
+  return (
+    text.includes("too many requests") ||
+    text.includes("rate limit") ||
+    text.includes("429") ||
+    text.includes("timeout") ||
+    text.includes("missing response")
+  )
+}
+
+async function withRpcRetry(description, action) {
+  for (let attempt = 0; attempt <= rpcRetries; attempt += 1) {
+    try {
+      return await action()
+    } catch (error) {
+      const canRetry = isRetryableRpcError(error) && attempt < rpcRetries
+
+      if (!canRetry) {
+        if (isRetryableRpcError(error)) {
+          error.message +=
+            "\n\nRPC rate limit was hit while reading on-chain logs. Wait a minute and rerun, or use another Sepolia RPC URL for proof generation."
+        }
+
+        throw error
+      }
+
+      const waitMs = requestDelayMs * 2 ** attempt
+      console.warn(
+        `RPC request failed while ${description}. Retrying in ${waitMs} ms (${attempt + 1}/${rpcRetries})...`
+      )
+      await sleep(waitMs)
+    }
+  }
+
+  throw new Error(`RPC retry loop exhausted while ${description}`)
+}
+
 async function queryEventsInChunks(contract, eventName, filterArgs, fromBlock, chunkSize) {
-  const latestBlock = await provider.getBlockNumber()
+  const latestBlock = await withRpcRetry("reading latest block number", () => provider.getBlockNumber())
   const events = []
 
   for (let from = fromBlock; from <= latestBlock; from += chunkSize + 1) {
     const to = Math.min(from + chunkSize, latestBlock)
     const filter = contract.filters[eventName](...filterArgs)
-    const chunk = await contract.queryFilter(filter, from, to)
+    const chunk = await withRpcRetry(`fetching ${eventName} logs from block ${from} to ${to}`, () =>
+      contract.queryFilter(filter, from, to)
+    )
     events.push(...chunk)
+
+    if (requestDelayMs > 0 && to < latestBlock) {
+      await sleep(requestDelayMs)
+    }
   }
 
   return events
@@ -204,7 +287,9 @@ console.log(`Semaphore: ${semaphoreAddress}`)
 console.log(`groupId: ${groupId}`)
 console.log(`scope: ${scope}`)
 console.log("")
-console.log(`Fetching TradeDesk MemberAdded events in ${blockRange}-block chunks...`)
+console.log(
+  `Fetching TradeDesk MemberAdded events in ${blockRange}-block chunks with ${requestDelayMs} ms delay and ${rpcRetries} retries...`
+)
 
 const members = await getTradeDeskGroupMembers(groupId, startBlock, blockRange)
 
